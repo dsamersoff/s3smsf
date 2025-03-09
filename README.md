@@ -106,7 +106,7 @@ The core hardware consists of an ESP32 microcontroller and a SIM800Lv2 modem. Th
 
 **TODO:** Currently, power is supplied through an unusual MB102 board. It needs to be checked whether a standard USB power adapter can be used instead.
 
-![s3smsf.png]()
+![s3smsf.png](docs/s3smsf.png)
 
 ### Discussion
 1. A SIM card can store 10 to 15 messages. If the memory is full, new messages are no longer received. At the same time, there is no way to ensure a transactional operation — if message 4 is deleted successfully but message 5 is not, the next deletion attempt for message 5 might accidentally remove a newly received message. Therefore, messages are read one by one in a loop, and `CMGL` is not used.

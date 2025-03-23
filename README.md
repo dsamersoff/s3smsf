@@ -1,4 +1,4 @@
-# SMS Forwarder on SDP32-WROOM and SIM800Lv2 or Linux and Huawei GSM Modem
+# SMS Forwarder on ESP32 and SIM800Lv2 or Linux and Huawei GSM Modem
 
 _Russian version of this document is documents/README_RUS.md_
 

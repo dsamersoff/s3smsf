@@ -93,6 +93,8 @@ int com_read_impl(int fd, char *data, int data_size, int timeout, int* bytes_rea
         *bytes_read = strlen(resp);
         return 0;
     }
+
+    return -1;
 }
 
 int com_read(int fd, char *data, int data_size, int timeout, int* bytes_read) {
@@ -102,10 +104,10 @@ int com_read(int fd, char *data, int data_size, int timeout, int* bytes_read) {
         return 0;
     }
 
-    com_read_impl(fd, data, data_size, timeout, bytes_read);
+    int res = com_read_impl(fd, data, data_size, timeout, bytes_read);
 
     data[*bytes_read] = '\0'; // ensure null termination for convenience
     _last_index = 0;
-    return 0;
+    return res;
 }
 

@@ -139,24 +139,84 @@ static int read_ok(int fd) {
 }
 
  // Ping modem
- int ata_ping(int fd) {
+int ata_ping(int fd) {
     CHECK(send_command_cr(fd, "AT"));
     return read_ok(fd);
- }
+}
 
- int ata_echo(int fd, int onoff) { // 0 off, 1 on
-    CHECK(send_command_dig_cr(fd, "ATE", onoff)); // Read the message
+int ata_echo(int fd, int onoff) { // 0 off, 1 on
+    CHECK(send_command_dig_cr(fd, "ATE", onoff));
     return read_ok(fd);
- }
+}
 
+// Warning! Running AT+COPS=2 will puth the nepwork to FPLMN (i.e. BAN list)
+int ata_cops(int fd, int mode, const char *network) {
+    if (mode == 1 || mode == 4) {
+        char s_mode[6] = {0};
+        ui_to_str(mode, s_mode);
+        CHECK(send_command(fd, "AT+COPS=", s_mode, ",1,\"", network, "\"", CRLF, NULL));
+    }
+    else {
+        CHECK(send_command_dig_cr(fd, "AT+COPS=", mode));
+    }
+    return read_ok(fd);
+}
 
- // Send AT+CCALR?
- // TODO: parse response and get status
- int ata_ready(int fd) {
+int ata_clear_FPLNM(int fd) {
+    CHECK(send_command_cr(fd, "AT+CRSM=214,28539,0,0,12,\"FFFFFFFFFFFFFFFFFFFFFFFF\""));
+    return read_ok(fd);
+}
+
+int ata_sync_clock(int fd) {
+ //   Warning, it puts network to the FPLNM (BAN) list so you will need to reconnect manually.
+ //   CHECK(send_command_cr(fd, "AT+COPS=2"));
+ //   CHECK(read_ok(fd));
+
+    CHECK(send_command_cr(fd, "AT+CLTS=1"));
+    CHECK(read_ok(fd));
+
+    CHECK(send_command_cr(fd, "AT+COPS=0"));
+    CHECK(read_response_gb(fd));
+    return 0;
+}
+
+// AT+CCLK?
+int ata_get_clock(int fd, char *info, int info_size) {
+    CHECK(send_command_cr(fd, "AT+CCLK?"));
+    CHECK(read_response_gb(fd));
+
+    int pos = 0;
+    const char *line;
+    int line_len;
+    while(pos != -1) {
+        read_line(_rd_buf, &pos, &line, &line_len);
+        if (line_len > 6 && (memcmp(line, "+CCLK:", 6) == 0)) {
+            copy_quoted(info, info_size, line, line_len);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+// Send AT+CCALR?
+// TODO: parse response and get status
+int ata_ready(int fd) {
     CHECK(send_command_cr(fd, "AT+CCALR?"));
     CHECK(read_response_gb(fd));
     return 0;
- }
+}
+
+int ata_network_status(int fd) {
+    CHECK(send_command_cr(fd, "AT+CREG?"));
+    CHECK(read_response_gb(fd));
+    return 0;
+}
+
+int ata_power_status(int fd) {
+    CHECK(send_command_cr(fd, "AT+CBC"));
+    CHECK(read_response_gb(fd));
+    return 0;
+}
 
  // Send AT+COPS?
  // +COPS: 0,0,"Bee Line GSM"
@@ -178,6 +238,12 @@ static int read_ok(int fd) {
     return -1;
 }
 
+int ata_op_list(int fd) {
+    CHECK(send_command_cr(fd, "AT+COPS=?"));
+    CHECK(read_response_gb(fd));
+    return 0;
+}
+
 int ata_set_pdu_mode(int fd) {
     CHECK(send_command_cr(fd, "AT+CMGF=0")); // Set PDU mode
     return read_ok(fd);
@@ -188,19 +254,12 @@ int ata_set_cset_UCS2(int fd) {
     return read_ok(fd);
 }
 
-int ata_send_message(int fd, const char *number, struct sms_message *msg) {
-    struct sms_pdu spdu;
-    int len = create_pdu(number, msg, &spdu);
-    if (len < 0 || len > 255*2) {
-        log_err("PDU length error %d for {%s} {%s}", len, number, msg->text);
-        return -1;
-    }
-
-    CHECK(send_command_dig_cr(fd, "AT+CMGS=", len/2)); // Max size here is 255
+static int ata_send_message_impl(int fd, struct sms_pdu *spdu) {
+    CHECK(send_command_dig_cr(fd, "AT+CMGS=", spdu->len/2)); // Max size here is 255
     // Modem should return > but we don't care. Try to send and check modem error later
     // So only os error is checked here
     CHECK(read_response_gb(fd));
-    CHECK(send_command_z(fd, spdu.pdu));
+    CHECK(send_command_z(fd, spdu->pdu));
     CHECK(read_response_gb(fd));
 
     int pos = 0;
@@ -208,14 +267,47 @@ int ata_send_message(int fd, const char *number, struct sms_message *msg) {
     int line_len;
     while(pos != -1) {
         read_line(_rd_buf, &pos, &line, &line_len);
-        if (line_len > 10 && memcmp(line, "+CMS ERROR", 10) == 0) {
-            log_err("Not able to send message %d {%s} {%s}", strlen(msg->text), number, msg->text);
+        if ((line_len > 10 && memcmp(line, "+CMS ERROR", 10) == 0) ||
+            (line_len > 5 && memcmp(line, "ERROR", 5) == 0)) {
+
+            log_err("Not able to send message %d {%s}", spdu->len, spdu->pdu);
             dump_by_line(_rd_buf);
             return -1;
         }
     }
-
     return 0;
+}
+
+int ata_send_message(int fd, const char *number, struct sms_message *msg) {
+    int res = 0;
+    struct sms_pdu *spdu = NULL;
+    CHECK(create_pdu(number, msg, &spdu))
+    if (spdu->len > 255*2) {
+        log_err("PDU length error %d for {%s} {%s}", spdu->len, number, msg->text);
+        free(spdu);
+        return -1;
+    }
+    res = ata_send_message_impl(fd, spdu);
+    free(spdu);
+    return res;
+}
+
+int ata_send_message_multipart(int fd, const char *number, struct sms_message *msg) {
+    int res = 0;
+    struct sms_pdu *spdu = NULL;
+    int split_parts = 0;
+    CHECK(create_pdu_multipart(number, msg, &spdu, &split_parts))
+    for(int i = 0; i < split_parts; ++i) {
+        if (spdu[i].len > 255*2) {
+            log_err("PDU length error %d for {%s} {%s}", spdu[i].len, number, msg->text);
+            free(spdu);
+            return -1;
+        }
+        log_noise("Sending PDU %d {%s}", spdu[i].len, spdu[i].pdu);
+        res = ata_send_message_impl(fd, &(spdu[i]));
+    }
+    free(spdu);
+    return res;
 }
 
 // Get memory source and number of messages
@@ -227,25 +319,31 @@ int ata_msg_count(int fd, int *msgs_to_read) {
     int pos = 0;
     const char *line;
     int line_len;
+    int res = -1;
+    int messages = 0;
     while(pos != -1) {
         read_line(_rd_buf, &pos, &line, &line_len);
         if (line_len > 6 && memcmp(line, "+CPMS:", 6) == 0) {
             const char *s = line;
             while(*s != ',' && s - line < line_len) ++s;
-            if (s - line != line_len) { // paranoya guard against mailformed line
-                *msgs_to_read = atoi(s+1);
-                return 0;
-            }
+            messages = atoi(s+1);
+        }
+        if (line_len > 2 && memcmp(line, "OK", 2) == 0) {
+            res = 0;
         }
     }
 
-    dump_by_line(_rd_buf);
-    return -1;
+    if (res == 0) {
+        *msgs_to_read = messages;
+    }
+    else {
+        dump_by_line(_rd_buf);
+    }
+    return res;
 }
 
 int ata_read_message(int fd, int msg_no, struct sms_message *msg) {
     int res;
-
     CHECK(send_command_dig_cr(fd, "AT+CMGR=", msg_no)); // Read the message
     CHECK(read_response_gb(fd));
 

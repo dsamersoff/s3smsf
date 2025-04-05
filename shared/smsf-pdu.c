@@ -27,6 +27,25 @@
 
 extern struct smsf_options _opts;
 
+static struct sms_pdu *new_pdus(int n_pdus) {
+    struct sms_pdu *pdus = malloc(sizeof(struct sms_pdu) * n_pdus);
+    if (pdus == NULL) {
+       log_err("Can't allocate %d bytes memory for %d pdus", sizeof(struct sms_pdu) * n_pdus, n_pdus);
+       abort();
+       return NULL;
+    }
+    return pdus;
+}
+
+static int need_ucs2(const char *input, int input_len) {
+    for(int i = 0; i < input_len; ++i) {
+        if ((input[i] & 0x80) != 0) {
+            return 1; // Has non- ascii characters, need UCS2 encoding
+        }
+    }
+    return 0; // 7-bit is enough
+}
+
 // Convert a phone number to semi-octet format, keep hex representation
 static int encode_semi_octets(const char *input, int input_len, unsigned char *output) {
     int i, j;
@@ -49,7 +68,7 @@ static int decode_semi_octets(const unsigned char* input, int input_len, char* o
         output[j] = '0' + (input[i] & 0x0F);
         output[j + 1] = ((input[i] >> 4) == 0xF) ? 0 : '0' + (input[i] >> 4);
         if (j >= output_size) {
-            log_err("decode_semi_octet output truncated to %d", output_size);
+            log_debug("decode_semi_octet output truncated to %d", output_size);
             break;
         }
         j += 2;
@@ -88,7 +107,7 @@ static int decode_7bit(const unsigned char *input, int input_length, char *outpu
         prev = input[i];
         shift++;
         if (j >= output_size) {
-            log_err("decode_7bit output truncated to %d", output_size);
+            log_debug("decode_7bit output truncated to %d", output_size);
             break;
         }
         j += 1;
@@ -156,7 +175,7 @@ static int decode_ucs2(const unsigned char *input, int input_length, char *outpu
         }
         if (j >= output_size) {
             j -= 3; // correct index to avoid overflow, TODO: do it better
-            log_err("decode_ucs2 output truncated to %d", output_size);
+            log_debug("decode_ucs2 output truncated to %d", output_size);
             break;
         }
     }
@@ -188,37 +207,19 @@ static void decode_ts(const unsigned char *pdu, char* out_ts) {
     ui_to_str(btz, out_ts+offs);
 }
 
-static int need_ucs2(const char *input, int input_len) {
-    for(int i = 0; i < input_len; ++i) {
-        if ((input[i] & 0x80) != 0) {
-            return 1; // Has non- ascii characters, need UCS2 encoding
-        }
-    }
-    return 0; // 7-bit is enough
-}
-
 // Function to create a PDU string
-int create_pdu(const char *dest_addr, struct sms_message *msg, struct sms_pdu *output) {
-    memcpy(output, "0011000B91", 10);
+static int create_pdu_impl(const char *dest_addr, int coding, const uint8_t *encoded_text, int encoded_len, struct sms_message *msg, struct sms_pdu *output) {
+    // Copy header from the template
+    const char *pdu_hdr = (msg->split_ref == 0) ? "0011000B91" : "0051000B91"; // Without/With UHDI
+    memcpy(output, pdu_hdr, 10);
     int offs = 10;
 
     int ds_len = strlen(dest_addr);
-    int text_len = strlen(msg->text);
-    int coding = need_ucs2(msg->text, text_len) ? 8 : 0;
 
-   // Validation, bail out if DA is too long but truncate the text
-   // TODO: Support multipart messages:
-   //      https://en.wikipedia.org/wiki/Concatenated_SMS
+    // Validation, bail out if DA is too long
     if (ds_len > 12) {
         log_err("Destination address too long %d (should be less than 12)", ds_len);
         return -1;
-    }
-
-    //TODO: Make in precise
-    const int text_limit = (coding == 8) ? 80 : 160;
-    if (text_len > text_limit) {
-        log_err("Text is too long for message %d, truncated to %d", text_len, text_limit);
-        text_len = text_limit;
     }
 
     // Encode destination address
@@ -229,25 +230,128 @@ int create_pdu(const char *dest_addr, struct sms_message *msg, struct sms_pdu *o
     ui_to_hex(coding, output->pdu + offs); offs += 2; // coding
     ui_to_hex(0, output->pdu + offs); offs += 2; // TS (default)
 
-    // Max PDU size is 255 char, calc size to not overflow
-    // TODO: Support SMS splitting
-    unsigned char enc_tmp[text_len * 2];
-    int enc_len = 0;
     if (coding == 8 /*ucs2*/) {
-        enc_len = encode_ucs2(msg->text, text_len, enc_tmp);
-        ui_to_hex(enc_len, output->pdu + offs); offs += 2; // length of the encoded message
-
+        int data_len = (msg->split_ref == 0) ? encoded_len : encoded_len + 6;
+        ui_to_hex(data_len, output->pdu + offs); offs += 2; // length of the encoded message
     }
     else {
-        enc_len = encode_7bit(msg->text, text_len, enc_tmp);
-        ui_to_hex(text_len, output->pdu + offs); offs += 2; // length of the original text
+        int data_len = (msg->split_ref == 0) ? (encoded_len/7)*8 : (encoded_len/7*8) + 6;
+        ui_to_hex(data_len, output->pdu + offs); offs += 2; // length of the original text
     }
 
-    // TODO: check output size
-    offs += bin2hex(enc_tmp, enc_len, output->pdu + offs);
+    // build UDH if required
+    // Support multipart messages:
+    //      https://en.wikipedia.org/wiki/Concatenated_SMS
+    if (msg->split_ref != 0) {
+        uint8_t udh_bin[6];
+
+        udh_bin[0] = 5;
+        udh_bin[1] = 0;
+        udh_bin[2] = 3;
+        udh_bin[3] = msg->split_ref;
+        udh_bin[4] = msg->split_parts;
+        udh_bin[5] = msg->split_no;
+
+        log_debug("Writing UDH %d:6 %02x %02x %02x %02x %02x %02x %02x", offs, udh_bin[0],udh_bin[1],udh_bin[2],udh_bin[3],udh_bin[4],udh_bin[5],udh_bin[6]);
+        offs += bin2hex(udh_bin, 6, output->pdu + offs);
+    }
+
+    log_debug("Writing text %d:%d {%s}", offs, encoded_len, encoded_text);
+    offs += bin2hex(encoded_text, encoded_len, output->pdu + offs);
     output->pdu[offs] = 0;
-    return offs-1; // output len
+    output->len = offs-1; // output len
+    return 0;
 }
+
+// Create pdu truncate long message
+int create_pdu(const char *dest_addr, struct sms_message *msg, struct sms_pdu **p_output) {
+    int text_len = strlen(msg->text);
+    int coding = need_ucs2(msg->text, text_len) ? 8 : 0;
+    uint8_t enc_tmp[text_len * 2]; // Worst case 1-byte UTF-8 converted to UCS2
+
+    // Max PDU size is 255 char, calc size to not overflow
+    int enc_len = (coding == 8) ? encode_ucs2(msg->text, text_len, enc_tmp) :
+                                  encode_7bit(msg->text, text_len, enc_tmp);
+
+    if (enc_len > MSG_TEXT_LIMIT) {
+        log_noise("Message is too long %d (%d), truncated to %d", text_len, enc_len, MSG_TEXT_LIMIT);
+        enc_len = MSG_TEXT_LIMIT;
+    }
+
+    msg->split_ref = 0; // Ensure single message without UDH
+    struct sms_pdu *output = new_pdus(1);
+    int res = create_pdu_impl(dest_addr, coding, enc_tmp, enc_len, msg, output);
+    *p_output = output;
+    if (res != 0) {
+        log_err("Can't create the single PDU for: %s (%d/%d) {%s}", msg->sender, enc_len, text_len, msg->text);
+        free(output);
+    }
+    return res;
+}
+
+// Create pdu split long message
+int create_pdu_multipart(const char *dest_addr, struct sms_message *msg, struct sms_pdu **p_output, int *p_parts) {
+    int text_len = strlen(msg->text);
+    int coding = need_ucs2(msg->text, text_len) ? 8 : 0;
+    uint8_t enc_tmp[text_len * 2]; // Worst case 1-byte UTF-8 converted to UCS2
+
+    // Max PDU size is 255 char, calc size to not overflow
+    int enc_len = (coding == 8) ? encode_ucs2(msg->text, text_len, enc_tmp) :
+                                  encode_7bit(msg->text, text_len, enc_tmp);
+
+    struct sms_pdu *output = NULL;
+
+    if (enc_len < MSG_TEXT_LIMIT) {
+        msg->split_ref = 0; // Ensure single message without UDH
+        output = new_pdus(1);
+        int res = create_pdu_impl(dest_addr, coding, enc_tmp, enc_len, msg, output);
+        *p_output = output;
+        *p_parts = 1;
+        if (res != 0) {
+            log_err("Can't create PDU for single message: %s (%d/%d/%d) {%s}", msg->sender, enc_len, text_len, MSG_TEXT_LIMIT, msg->text);
+            free(output);
+            return -1;
+        }
+        return res;
+    }
+
+    int text_limit = MSG_TEXT_LIMIT - 6; // Len of UDH
+    int split_parts = enc_len/text_limit + 1;
+    uint16_t split_ref = crc16(msg->text, text_len);
+    int split_no = 0;
+    int offs = 0;
+    int res = 0;
+
+    output = new_pdus(split_parts);
+
+    while(split_no < split_parts) {
+        int len = MIN(text_limit, enc_len - offs);
+        msg->split_ref = (split_ref & 0xFF); // ensue multipart
+        msg->split_parts = split_parts;
+        msg->split_no = ++split_no;
+
+        if (_opts.verbosity > LOG_INFO) {
+            char log_tmp[text_limit];
+            res = (coding == 8) ?
+                decode_ucs2(enc_tmp +offs, len, log_tmp, text_limit):
+                decode_7bit(enc_tmp +offs, len, log_tmp, text_limit);
+            log_debug("Building part of multipart message: %s (%d/%d/%d) (%d %d/%d) {{%s}}", msg->sender, len, text_len, text_limit, split_ref, split_no, split_parts, log_tmp);
+        }
+
+        res = create_pdu_impl(dest_addr, coding, enc_tmp + offs, len, msg, &(output[split_no - 1]));
+        if (res != 0) {
+            log_err("Can't create PDU for multipart message: %s (%d/%d/%d) (%d %d/%d)", msg->sender, len, text_len, text_limit, split_ref, split_no, split_parts);
+            free(output);
+            return -1;
+        }
+        offs += len;
+    }
+
+    *p_output = output;
+    *p_parts = split_parts;
+    return 0;
+}
+
 
 // Function to decode a PDU message
 int decode_pdu(const char* pdu, int pdu_len, struct sms_message *msg) {
@@ -290,7 +394,7 @@ int decode_pdu(const char* pdu, int pdu_len, struct sms_message *msg) {
             decode_semi_octets(pdu_bin + offs, sa_len, msg->sender, sizeof(msg->sender));
             break;
         default: // Unknow
-            strncpy(msg->sender,"Unknown", sizeof(msg->sender)); // TODO: zero termination
+            strcpy(msg->sender, "Unknown");
             break;
     }
 
@@ -308,18 +412,22 @@ int decode_pdu(const char* pdu, int pdu_len, struct sms_message *msg) {
     offs += 7;
     int data_len = pdu_bin[offs++];
 
-    log_debug("Received message: %x hdr: %x type: %x ton: %x dcs: %x udhi: %x len/sa/da %d/%d/%d", msg->hash_id, pdu_header, msg_type, ton, dcs, udhi, pdu_len, sa_len, data_len);
-
     char *msg_out = msg->text;
-    int msg_out_len = sizeof(msg->text);
+    int msg_out_len = msg->text_size;
+    int udh_len = 0;
 
     if (udhi == 1) {
-        // We currently doen't support message spitting, but able to process data with UDHI
-        int udh_len = pdu_bin[offs++];
+        // The only supported type of UDHI - multipart messages
+        udh_len = pdu_bin[offs++];
         if (pdu_bin[offs] == 0) { // Concatenated SMS
             msg->split_ref = pdu_bin[offs + 2]; // Reference number
             msg->split_parts = pdu_bin[offs + 3]; // Total split parts
             msg->split_no = pdu_bin[offs + 4]; // Number of part in split, starting from 1.
+        }
+        else if (pdu_bin[offs] == 8) { // Concatenated SMS, 16 bit ref
+            msg->split_ref = pdu_bin[offs + 2] << 8 | pdu_bin[offs + 3]; // Reference number
+            msg->split_parts = pdu_bin[offs + 4]; // Total split parts
+            msg->split_no = pdu_bin[offs + 5]; // Number of part in split, starting from 1.
         }
 
         offs += udh_len;
@@ -331,7 +439,11 @@ int decode_pdu(const char* pdu, int pdu_len, struct sms_message *msg) {
             msg_out_len -= 1;
             data_len -= 1;
         }
-        log_debug("Received message: hdr: 0x%x UHDI dlen/ulen: %d/%d 0x%X Split: %x/%x", pdu_header, data_len, udh_len, pdu_bin+offs, msg->split_ref, msg->split_no);
+    }
+
+    log_debug("%x Received message (1): pdu_hdr: 0x%x type: %x ton: %x dcs: %x udhi: %x len/sa/da %d/%d/%d", msg->hash_id, pdu_header, msg_type, ton, dcs, udhi, pdu_len, sa_len, data_len);
+    if (udhi == 1) {
+        log_debug("%x Received message (2): data len %d UDHI len %d split: %x %d/%d", msg->hash_id, pdu_header, data_len, udh_len, msg->split_ref, msg->split_no, msg->split_parts);
     }
 
     if (dcs < 4 ) { // DCS 0,1,2,3 - means 7bit
@@ -351,73 +463,82 @@ int decode_contact(const char *name, int name_len, char *out_name, int out_size)
 }
 
 #ifdef _PDU_TEST
-// TODO: TS parser incorrectly decode timezone
-static struct pdu_test _pdu_w_test[] = {
-    {"0011000B919712890064F900000008D4F29C0E4ABEA9", {"79219800469", "", "Test IoT"}},
-    {"0011000B919712890064F90008002A041F0440043E043204350440043A043000200440044304410441043A043E0433043E00200049006F0054", {"79219800469", "", "Проверка русского IoT"}},
-    {"", {"", "", ""}}
-};
-
-static struct pdu_test _pdu_r_test[] = {
-    {"0791448720003023240DD0E474D81C0EBB010000111011315214000BE474D81C0EBB5DE3771B", {"diafaan", "2011-01-11T13:25:41Z+0", "diafaan.com"}},
-    {"07919712690080F8000B919712890064F90000522090022174210CD4F29C0E1287C76B50D109", {"+79219800469", "2025-02-09T20:12:47Z+3", "Test back EN"}},
-    {"07919712690080F8040B919712890064F900085220212193332124041F0440043E04320435044"\
-        "0043A0430002004410432044F043704380020004D00490058", {"+79219800469", "2025-02-12T12:39:33Z+3", "Проверка связи MIX"}},
-    {"07919736799499F8640DD0E272999D76971B000852207212329221370608045C250202002F006D0079006200650"\
-        "065002E0070006100670065002E006C0069006E006B002F0074006F007000750070000D000A", {"beeline", "2025-02-27T21:23:29Z+3", "/mybee.page.link/topup\r\n"}},
-    {"07919736799499F86409D1D2E910390500085220822155042143060804070B020204350020043E043F0430044104"\
-        "35043D0021002004110435044004350433043804420435002004410432043E044E0020043604380437043D044C0021", {"RSCHS", "2025-02-28T12:55:40Z+3", "е опасен! Берегите свою жизнь!"}},
-    {"07919712690080F8440B919712890064F9000052303041138521A0050003E10201"\
-        "986F79B90D4AC3E7F53688FC66BFE5A0799A0E0AB7CB741668FC76CFCB637A995E9783C2E4343C3D1FA7DD6750999DA6B340F33219447E83CAE9FABCFD268"\
-        "3E8E536FC2D07A5DDE334394DAEBBE9A03A1DC40E8BDFF232A84C0791DFECB7BC0C6A87CFEE3028CC4EC7EB6117A84"\
-        "A0795DDE936284C06B5D3EE741B642FBBD3E1360B14AFA7E7", {"+79219800469", "2025-03-03T14:31:58Z+3", "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore"\
-                                                                                                     " et dolore magna aliqua. Ut enim ad minim veniam, quis"}},
-    {"07919712690080F8440B919712890064F9000052303041138521A0050003E10201"\
-        "986F79B90D4AC3E7F53688FC66BFE5A0799A0E0AB7CB741668FC76CFCB637A995E9783C2E4343C3D1FA7DD6750999DA6B340F33219447E83CAE9FABCFD268"\
-        "3E8E536FC2D07A5DDE334394DAEBBE9A03A1DC40E8BDFF232A84C0791DFECB7BC0C6A87CFEE3028CC4EC7EB6117A84"\
-        "A0795DDE936284C06B5D3EE741B642FBBD3E1360B14AFA7E7", {"+79219800469", "2025-03-03T14:31:58Z+3", "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore"\
-                                                                                                     " et dolore magna aliqua. Ut enim ad minim veniam, quis"}},
-    {"07919712690080F8440B919712890064F900085230300213232150" \
-        "050003E20303"\
-        "044B0020044104420430044004300435043C0441044F002004380020043F043504470430044204300435043C0020044004300437043D0443044E0020043504400443043D04340443002E"
-        , {"+79219800469", "2025-03-03T20:31:32Z+3", "ы стараемся и печатаем разную ерунду."}},
-    {"", {"", "", ""}}
-};
 
 #define STATUS ((ok) ? "+OK " : "!ERR")
 
-static int print_w_test_results(struct pdu_test *pdut, const char *new_pdu) {
-    int ok = 0;
+int test_w_pdu(const char *ref_pdu, const char *sender, const char *text) {
+    struct sms_pdu *new_pdu = NULL;
+    struct sms_message *msg = malloc(sizeof(struct sms_message) + strlen(text) + 1);
 
-    ok = strcmp(pdut->pdu, new_pdu) == 0 ? 1 : 0;
-    printf("%s PDU.pdu: {{%s}} vs {{%s}} \n", STATUS, pdut->pdu, new_pdu);
+    strcpy(msg->sender, sender);
+    strcpy(msg->text, text);
+
+    create_pdu(msg->sender, msg, &new_pdu);
+    int ok = strcmp(ref_pdu, new_pdu->pdu) == 0 ? 1 : 0;
+    printf("--- Sender: {{%s}} Text {{%s}}\n", sender, text);
+    printf("%s PDU.pdu: {{%s}} vs {{%s}}\n", STATUS, ref_pdu, new_pdu->pdu);
+    free(msg);
+    free(new_pdu);
     return !ok;
 }
 
-static int print_r_test_results(struct pdu_test *pdut, const struct sms_message *msg) {
+int test_w_pdu_multipart(const char *ref_pdu[], int ref_parts, const char *sender, const char *text) {
+    int errors = 0;
+
+    struct sms_pdu *pdus = NULL;
+    struct sms_message *msg = malloc(sizeof(struct sms_message) + strlen(text) + 1);
+
+    strcpy(msg->sender, sender);
+    strcpy(msg->text, text);
+    msg->split_ref = crc16(msg->text, strlen(msg->text)) & 0xFF;
+
+    int n_parts = 0;
+    create_pdu_multipart(msg->sender, msg, &pdus, &n_parts);
+    printf("--- Sender: {{%s}} Text {{%s}}\n", sender, text);
+    if (n_parts != ref_parts) {
+        printf("Wrong number of split parts %d vs %d\n", n_parts, ref_parts);
+        errors += 1;
+    }
+
+    for (int i = 0; i < ref_parts; ++i) {
+        int ok = strcmp(ref_pdu[i], pdus[i].pdu) == 0 ? 1 : 0;
+        printf("%s PDU.pdu: {{%s}} vs {{%s}} \n", STATUS, ref_pdu[i], pdus[i].pdu);
+        errors += !ok;
+    }
+
+    free(msg);
+    free(pdus);
+    return errors;
+}
+
+int test_r_pdu(const char *pdu, const char *sender, const char *ts, const char *text) {
+    struct sms_message *msg = malloc(sizeof(struct sms_message) + MSG_TEXT_LIMIT + 1);
+    int res = decode_pdu(pdu, strlen(pdu), msg);
+    if (res != 0) {
+        printf("PDU {{%s}} decoding error", pdu);
+        return 1;
+    }
+
     int ok = 0;
     int errors = 0;
 
-    ok = strcmp(pdut->msg.sender, msg->sender) == 0 ? 1 : 0;
+    ok = strcmp(sender, msg->sender) == 0 ? 1 : 0;
     errors += !ok;
-    printf("%s PDU.sender: {{%s}} vs {{%s}}\n", STATUS, pdut->msg.sender, msg->sender);
+    printf("%s PDU.sender: {{%s}} vs {{%s}}\n", STATUS, sender, msg->sender);
 
-    ok = strcmp(pdut->msg.ts, msg->ts) == 0 ? 1 : 0;
+    ok = strcmp(ts, msg->ts) == 0 ? 1 : 0;
     errors += !ok;
-    printf("%s PDU.ts: {{%s}} vs {{%s}}\n", STATUS, pdut->msg.ts, msg->ts);
+    printf("%s PDU.ts: {{%s}} vs {{%s}}\n", STATUS, ts, msg->ts);
 
-    ok = strcmp(pdut->msg.text, msg->text) == 0 ? 1 : 0;
+    ok = strcmp(text, msg->text) == 0 ? 1 : 0;
     errors += !ok;
-    printf("%s PDU.text: {{%s}} vs {{%s}}\n", STATUS, pdut->msg.text, msg->text);
+    printf("%s PDU.text: {{%s}} vs {{%s}}\n", STATUS, text, msg->text);
 
+    free(msg);
     return errors;
 }
-#undef STATUS
 
 int test_pdu() {
-    struct sms_message msg;
-    char pdu[1024];
-
     int errors = 0;
 
     printf("\nTesting Contact decoding.\n");
@@ -425,28 +546,45 @@ int test_pdu() {
     char decoded[512];
     decode_contact(tmp, strlen(tmp), decoded, sizeof(decoded));
     if (strcmp(decoded, "PRIMARY NUMBER") != 0) {
-        printf("Contact decoding error {PRIMARY NUMBER} vs {%s}\n");
+        printf("Contact decoding error {PRIMARY NUMBER} vs {%s}\n", decoded);
         errors += 1;
     }
 
     printf("\nTesting PDU creation.\n");
-    for (int i = 0; _pdu_w_test[i].pdu[0] != 0; ++i) {
-        memset(pdu, 0, sizeof(pdu));
-        printf("PDU.pdu: {{%s}}\n", _pdu_w_test[i].pdu);
-        create_pdu(_pdu_w_test[i].msg.sender, _pdu_w_test[i].msg.text, pdu);
-        errors += print_w_test_results(&(_pdu_w_test[i]), pdu);
-    }
+    errors += test_w_pdu("0011000B919712890064F900000008D4F29C0E4ABEA9", "79219800469", "Test IoT");
+    errors += test_w_pdu("0011000B919712890064F90008002A041F0440043E043204350440043A043000200440044304410441043A043E0433043E00200049006F0054","79219800469","Проверка русского IoT");
+
+    const char *ref_pdu[2] = { "", ""};
+    errors += test_w_pdu_multipart(ref_pdu, 2, "79219800469", "Ветер порывами до 18 м/с прогнозируется в Санкт-Петербурге 06 марта. Будьте внимательны и осторожны! Вызов ЭОС-112.");
 
     printf("\nTesting PDU parsing.\n");
-    for (int i = 0; _pdu_r_test[i].pdu[0] != 0; ++i) {
-        memset(&msg, 0, sizeof(msg));
-        printf("PDU.pdu: {{%s}}\n", _pdu_r_test[i].pdu);
-        int res = decode_pdu(_pdu_r_test[i].pdu, strlen(_pdu_r_test[i].pdu), &msg);
-        if (res != 0) {
-            printf("PDU decoding error.\n");
-        }
-        errors += print_r_test_results(&(_pdu_r_test[i]), &msg);
-    }
+    errors += test_r_pdu(
+        "0791448720003023240DD0E474D81C0EBB010000111011315214000BE474D81C0EBB5DE3771B",
+        "diafaan", "2011-01-11T13:25:41Z+0","diafaan.com");
+    errors += test_r_pdu(
+        "07919712690080F8000B919712890064F90000522090022174210CD4F29C0E1287C76B50D109",
+        "+79219800469", "2025-02-09T20:12:47Z+3","Test back EN");
+    errors += test_r_pdu(
+        "07919712690080F8040B919712890064F900085220212193332124041F0440043E043204350440043A0430002004410432044F043704380020004D00490058",
+        "+79219800469", "2025-02-12T12:39:33Z+3","Проверка связи MIX");
+    errors += test_r_pdu(
+        "07919736799499F8640DD0E272999D76971B000852207212329221370608045C250202002F006D0079006200650065002E0070006100670065002E006C0069006E006B002F0074006F007000750070000D000A",
+        "beeline", "2025-02-27T21:23:29Z+3","/mybee.page.link/topup\r\n");
+    errors += test_r_pdu(
+        "07919736799499F86409D1D2E910390500085220822155042143060804070B020204350020043E043F043004410435043D0021002004110435044004350433043804420435002004410432043E044E0020043604380437043D044C0021",
+        "RSCHS", "2025-02-28T12:55:40Z+3","е опасен! Берегите свою жизнь!");
+    errors += test_r_pdu(
+        "07919712690080F8440B919712890064F9000052303041138521A0050003E10201986F79B90D4AC3E7F53688FC66BFE5A0799A0E0AB7CB741668FC76CFCB637A995E9783C2E4343C3D1FA7DD675"\
+        "0999DA6B340F33219447E83CAE9FABCFD2683E8E536FC2D07A5DDE334394DAEBBE9A03A1DC40E8BDFF232A84C0791DFECB7BC0C6A87CFEE3028CC4EC7EB6117A84A0795DDE936284C06B5D3EE741B642FBBD3E1360B14AFA7E7",
+        "+79219800469", "2025-03-03T14:31:58Z+3","Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis");
+    errors += test_r_pdu(
+        "07919712690080F8440B919712890064F9000052303041138521A0050003E10201986F79B90D4AC3E7F53688FC66BFE5A0799A0E0AB7CB741668FC76CFCB637A995E9783C2E4343C3D1FA7DD6750999DA6B340F33219447E83CAE9FABCFD268"\
+        "3E8E536FC2D07A5DDE334394DAEBBE9A03A1DC40E8BDFF232A84C0791DFECB7BC0C6A87CFEE3028CC4EC7EB6117A84A0795DDE936284C06B5D3EE741B642FBBD3E1360B14AFA7E7",
+        "+79219800469", "2025-03-03T14:31:58Z+3","Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis");
+    errors += test_r_pdu(
+        "07919712690080F8440B919712890064F900085230300213232150050003E20303044B0020044104420430044004300435043C0441044F"\
+        "002004380020043F043504470430044204300435043C0020044004300437043D0443044E0020043504400443043D04340443002E",
+        "+79219800469", "2025-03-03T20:31:32Z+3","ы стараемся и печатаем разную ерунду.");
 
     printf("Total results: %d errors\n\n", errors);
     return errors;

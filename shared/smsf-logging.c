@@ -17,6 +17,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <time.h>
 
 #ifdef HAVE_SYSLOG
   #include <syslog.h>
@@ -25,10 +26,22 @@
 #include "smsf-logging.h"
 #include "smsf-util.h"
 
-struct smsf_options _opts = { SMSF_VERSION, LOG_NOTICE, 0 /* SYSLOG */, 0 /*SLOW_READ*/ };
+struct smsf_options _opts = { SMSF_VERSION, LOG_DEBUG, 0 /* SYSLOG */, 0 /*SLOW_READ*/, 1 /* FORWARD */, 1 /* MULTIPART */, 1 /* MAY DELETE */, 1 /* HEADER */, 1 /* EXPIRE */ };
+FILE *_log_stream = NULL;
+
+#ifdef __linux__
+static void time_decorator(char *buffer) {
+   time_t rawtime;
+   struct tm *info;
+   time(&rawtime);
+   info = localtime( &rawtime );
+   strftime(buffer,20,"%Y-%m-%d %H:%M:%S", info);
+}
+#endif
+
 
 int log_impl(int verbosity, int err_code, const char *err_str, const char *format, ...) {
-    static char buf[1024] = {0};
+    static char buf[4096] = {0};
     static char *VB_NAMES[8] = {"EMEGR", "ALERT", "CRIT", "ERR", "WARNING", "NOTICE", "INFO", "DEBUG"};
 
     int offs = 0;
@@ -49,12 +62,22 @@ int log_impl(int verbosity, int err_code, const char *err_str, const char *forma
             syslog(verbosity, "%s", buf);
         }
 #endif
-        // Used plain stderr to reduce the number of places where we have
-        // os specific staff, but
+        if (_log_stream == NULL) {
+            _log_stream = stderr;
+        }
+
+#ifdef __linux__
+        // Under linux add time decorator
+        char ts[20];
+        time_decorator(ts);
+        fprintf(_log_stream, "%s [%s]:%s\n", ts, VB_NAMES[verbosity], buf);
+#else
+        // Used plain stderr to reduce the number of places where we have os specific staff, but
         //   esp_log_write((verbosity == 1) ? ESP_LOG_ERROR : ESP_LOG_INFO), LOG_PREFIX, "%s\r\n", buf);
         // might be better choice.
-        fprintf(stderr, "%s[%s]:%s\n", LOG_PREFIX, VB_NAMES[verbosity], buf);
-        fflush(stderr);
+        fprintf(_log_stream, "%s[%s]:%s\n", LOG_PREFIX, VB_NAMES[verbosity], buf);
+#endif
+        fflush(_log_stream);
     }
 
     // Shorthand that allows to use log_* macro in return statement

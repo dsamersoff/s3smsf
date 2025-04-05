@@ -132,24 +132,24 @@ static void CRASH_hdl(int sig, siginfo_t* info, ucontext_t* uc) {
       bp = (void**) uc->uc_mcontext.mc_rbp;
     #endif
 
-    log_info("#");
-    log_info("# An unexpected error has been detected:");
-    log_info("#");
-    log_info("# SIGNAL %d at ip=0x%p, pid=%ld\n", sig,  ip, (long) getpid());
-    log_info("#");
-    log_info("# %s", _opts.version);
-    log_info("#");
-    log_info("# Stack: sp=%p\n", sp);
+    log_write("#");
+    log_write("# An unexpected error has been detected:");
+    log_write("#");
+    log_write("# SIGNAL %d at ip=0x%p, pid=%ld\n", sig,  ip, (long) getpid());
+    log_write("#");
+    log_write("# %s", _opts.version);
+    log_write("#");
+    log_write("# Stack: sp=%p\n", sp);
 
     int nptrs;
     void *buffer[BT_BUF_SIZE];
 
     nptrs = backtrace(buffer, BT_BUF_SIZE);
-    log_info("# Backtrace: %d\n", nptrs);
+    log_write("# Backtrace: %d\n", nptrs);
     char **strs = backtrace_symbols(buffer, nptrs);
     if (strs != NULL) {
         for (int i = 0; i < nptrs; ++i) {
-            log_info("%s", strs[i]);
+            log_write("%s", strs[i]);
         }
     }
     free(strs);

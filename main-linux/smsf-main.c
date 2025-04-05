@@ -31,6 +31,7 @@
 #define COM_DEVICE "/dev/ttyUSB0"
 
 extern struct smsf_options _opts;
+extern FILE *_log_stream;
 int _fd = 0;
 
 // TODO
@@ -49,7 +50,8 @@ static void usage(const char *msg) {
         "s3smsf -v - set verbosity level 3 (ERROR), 7 (DEBUG), default - NOISE\n" \
         "s3smsf -D - daemonize\n" \
         "s3smsf -K - kill running daemon\n" \
-        "s3smsf -L - duplicate all messages to syslog\n" \
+        "s3smsf -l <filename> - log file name\n" \
+        "s3smsf -L - enable syslog\n" \
         "";
 
     fprintf(stderr, "Usage: %s\n", help);
@@ -66,9 +68,10 @@ int main(int argc, char* argv[]) {
     char * o_port = NULL;
     int o_daemonize = 0;
     int o_killrunning = 0;
+    char *o_log_file = NULL;
 
     int c;
-    while ((c = getopt(argc, argv, "a:c:p:v:KLD")) != -1) {
+    while ((c = getopt(argc, argv, "a:c:p:v:Kl:LD")) != -1) {
         switch (c) {
             case 'a':
                 o_destaddr = strdup(optarg); // Expected memory leaks.
@@ -89,7 +92,10 @@ int main(int argc, char* argv[]) {
                 o_killrunning = 1;
                 break;
             case 'L':
-                _opts.syslog = 1; // Silence some output
+                _opts.syslog = 1; 
+                break;
+            case 'l':
+                o_log_file = strdup(optarg);
                 break;
             case 'D':
                 o_daemonize = 1;
@@ -121,6 +127,10 @@ int main(int argc, char* argv[]) {
         daemonize(PROG_NAME);
     }
 
+    if (o_log_file != NULL) {
+	_log_stream = fopen(o_log_file, "a+");
+    }
+
     if (_opts.syslog) {
 #ifdef HAVE_SYSLOG
         openlog(PROG_NAME, LOG_PID, LOG_UUCP);
@@ -143,7 +153,7 @@ int main(int argc, char* argv[]) {
         //    exit(-1);
         // }
 
-        if (proceed_command_message(_fd, o_command) != 1) {
+        if (process_command_message(_fd, o_command) != 1) {
             log_err("Invalid command {%s}", o_command);
             usage(NULL);
         }

@@ -3,6 +3,8 @@ build/
 moc-build/
 linux-build/
 docs-ext/
+build-moc/
+build-linux/
 s3smsf
 *.code-workspace
 sdkconfig

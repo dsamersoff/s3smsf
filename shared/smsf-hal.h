@@ -58,4 +58,14 @@ int com_write(int fd, const char *data, int data_size, int *bytes_written);
 
 int com_read(int fd, char *data, int data_size, int timeout, int *bytes_read);
 
+/**
+ * @brief Insert full fence
+ *
+ */
+inline void fence() {
+    #ifdef __linux__
+        __atomic_thread_fence(__ATOMIC_ACQ_REL);
+    #endif
+}
+
 #endif

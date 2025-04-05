@@ -29,7 +29,7 @@
 #include "esp_log.h"
 #endif
 
-#define SMSF_VERSION 0x2012
+#define SMSF_VERSION 0x3005
 
 /**
  * @brief Library options.
@@ -39,6 +39,11 @@ struct smsf_options {
     int verbosity;    //! report errors 0 - silent, 1 - error, 2 - noise, 3 -debug
     int syslog;       //! print messages to syslog if syslog is available
     int slow_read;    //! Use AT+CMGR=<id> instead of AT+CMGL=4 to read messages
+    int forward;      //! Allow disabled forwarding
+    int multipart;    //! Send long messages as multipart (1) or truncate (0)
+    int may_delete;   //! Delete forwarded messages, if disabled - keep messages until explicit clean or expire.
+    int header;       //! Add original sender and TS information as an extra header
+    int expire;       //! Expire mode - 0 disabled, 1 - soft, calculate the difference between earliest and latest SMS, 2 - hard, rely on network clock (not recommended)
 };
 
 #ifndef HAVE_SYSLOG
@@ -54,7 +59,7 @@ struct smsf_options {
     #define LOG_DEBUG   7   /* debug-level messages */
 #endif
 
-#define LOG_PREFIX "smsf: "
+#define LOG_PREFIX "smsf:"
 
 /* Convience error checking */
 #define CHECK(a) if ((a) == -1) { return -1; }
@@ -64,8 +69,9 @@ struct smsf_options {
 #define log_write(fmt, args...)  log_impl(LOG_EMERG, 0, NULL, fmt, ##args)
 #define log_err(fmt, args...)    log_impl(LOG_ERR, 0, NULL, fmt, ##args)
 #define log_errno(fmt, args...)  log_impl(LOG_ERR, errno, strerror(errno), fmt, ##args)
-#define log_info(fmt, args...)  log_impl(LOG_INFO, 0, NULL, fmt, ##args)
+#define log_warn(fmt, args...)  log_impl(LOG_WARNING, 0, NULL, fmt, ##args)
 #define log_noise(fmt, args...)  log_impl(LOG_NOTICE, 0, NULL, fmt, ##args)
+// Not used #define log_info(fmt, args...)  log_impl(LOG_INFO, 0, NULL, fmt, ##args)
 #define log_debug(fmt, args...)  log_impl(LOG_DEBUG, 0, NULL, fmt, ##args)
 
 #define assert_ret(cond, fmt, args...) { if (!(cond)){ log_impl(LOG_ERR, 0, NULL, "%s:%d " fmt, __FILE__, __LINE__, ##args); return -1; }}

@@ -26,7 +26,7 @@ typedef void (notify_func_t)(char *format, ... );
  * @param text - command
  * @return int - 1 if command processed, 0 if command is not recognized
  */
-int proceed_command_message(int device, const char *text);
+int process_command_message(int device, const char *text);
 
 /**
  * @brief Pre-requsites for main flow loop

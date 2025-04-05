@@ -20,6 +20,8 @@
 #include <stdint.h>
 #include <time.h>
 
+#define MIN(x, y) (((x) < (y)) ? (x) : (y))
+
 void ui_to_str(unsigned int num, char *str);
 void ui_to_hex(unsigned int num, char *str);
 
@@ -59,7 +61,7 @@ int copy_quoted(char *dest, int dest_size, const char *src, int src_len);
 int16_t crc16(const char* data, int len);
 
 /**
- * @brief Convert ISO 8601 ts to unix ts, to compare
+ * @brief Convert ISO 8601 ts to unix ts
  *        TimeZone is not respected
  *
  * @param iso_time - iso timestamp e.g. "2024-03-04T12:34:56Z+3"
@@ -67,5 +69,15 @@ int16_t crc16(const char* data, int len);
  */
 
 time_t iso2time(const char *iso_time);
+
+/**
+ * @brief Convert GSM ts to unix ts
+ *        TimeZone is not respected
+ *
+ * @param gsm_time - iso timestamp e.g. "25/04/01,20:42:13+12"
+ * @return long - Unix timestamp (integer seconds since the epoch).
+ */
+
+time_t gsm2time(const char *gsm_time);
 
 #endif

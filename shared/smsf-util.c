@@ -197,7 +197,7 @@ time_t iso2time(const char *iso_time) {
 
     // Parse the ISO 8601 formatted string
     if (sscanf(iso_time, "%4d-%2d-%2dT%2d:%2d:%2d", &year, &month, &day, &hour, &minute, &second) != 6) {
-        return -1;
+        return 0;
     }
 
     struct tm tm = {0};
@@ -210,3 +210,26 @@ time_t iso2time(const char *iso_time) {
 
     return mktime(&tm);
 }
+
+// Function to convert GSM string to timestamp
+// strptime is not portable
+time_t gsm2time(const char *gsm_time) {
+    int year, month, day, hour, minute, second;
+
+    // Parse the GSM formatted string
+    if (sscanf(gsm_time, "%2d/%2d/%2d,%2d:%2d:%2d", &year, &month, &day, &hour, &minute, &second) != 6) {
+        return 0;
+    }
+
+    struct tm tm = {0};
+    tm.tm_year = (year + 2000) - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_sec = second;
+
+    return mktime(&tm);
+}
+
+

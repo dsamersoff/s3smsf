@@ -24,12 +24,23 @@
  // Send AT to check response
  int ata_ping(int fd);
  int ata_echo(int fd, int onoff);
+ // Warning! Running AT+COPS=2 will puth the nepwork to FPLMN (i.e. BAN list)
+ int ata_cops(int fd, int mode, const char *network);
+ int ata_clear_FPLNM(int fd);
+
+ // Syn clock from the network
+ int ata_sync_clock(int fd);
 
  // Send AT+CCALR?
  int ata_ready(int fd);
+ int ata_network_status(int fd);
+ int ata_power_status(int fd);
 
  // Send AT+COPS?
  int ata_op_info(int fd, char *info, int info_len);
+ int ata_op_list(int fd); // for debugging only
+
+ int ata_get_clock(int fd, char *info, int info_size);
 
  //
  int ata_set_pdu_mode(int fd);
@@ -37,6 +48,7 @@
 
  // Send/Read SMS
  int ata_send_message(int fd, const char *number, struct sms_message *msg);
+ int ata_send_message_multipart(int fd, const char *number, struct sms_message *msg);
 
  int ata_msg_count(int fd, int *msgs_to_read);
 

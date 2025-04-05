@@ -10,6 +10,13 @@ The software part is written entirely from scratch in C and is designed to work 
 
 The hardware part of the standalone device consists of an ESP32-WROOM (there are many ESP32 variants, but it must have UART2 and support 5V power), a SIM800Lv2 module (the second version has a much better antenna and supports 5V power), and an SSD1306 I2C LCD display (128x64). The display is optional and is used to show the current status.
 
+### Changes from the Previous Release
+
+- A diode was added to the hardware to protect the ESP32 from power overload during modem startup.
+- The MP102 board was removed and replaced with a simple Type-C connector.
+- Support for reading and sending multipart (concatenated) SMS messages has been implemented.
+- Code refactoring was performed: heap memory is now used for storing and processing messages instead of on-stack buffers, as the latter caused hard-to-trace issues on the ESP32.
+
 ### User Guide
 - Purchase a SIM card with a plan that includes a sufficient number of SMS messages, in MINI-SIM format.
 - Insert the SIM card into a phone and:
@@ -19,13 +26,13 @@ The hardware part of the standalone device consists of an ESP32-WROOM (there are
 
 #### For Standalone Device Users
 - Prepare a power adapter, USB 5V 2A.
-- Prepare a MINI-USB cable.
+- Prepare a USB type-C cable.
 - Insert the SIM card into the modem.
 - Turn on the power.
 - Wait a few minutes and ensure that the screen displays:
   - `DM\S <version>`
-  - The phone number for forwarding.
   - The name of your GSM operator.
+  - The phone number for forwarding.
   - Scrolling lines showing the number of messages found.
 
 #### For Linux and USB Modem Users
@@ -36,15 +43,24 @@ The hardware part of the standalone device consists of an ESP32-WROOM (there are
   ```
   - The program can run in the background with the `-D` flag.
   - The forwarding phone number can be specified in the command line with `-a <phone>`.
+  - You can execute maintenance command right from command line with `-c <command>` e.g. `-c "++CLEAR"
+  - You can adjust verbosity level with `-v ` from 3 (ERROR) to 7 (DEBUG)
+  - You can redirect log output to file with `-l <filename>`
+  - Or to syslog with `-L`
 
 SMS messages sent from the **PRIMARY NUMBER** can contain control commands. Command SMS messages are not forwarded.
 
 The following commands are available:
-- `++CLEAR` - Delete all messages from the SIM card.
-- `++DUMP` - Print all messages from the SIM card to the console.
-- `++CONTACTS` - Print the first 25 stored contacts to the console.
-- `++SAVED` - Print all messages from the internal table to the console.
-- `++LOG <digit>` - Set the logging level, where 1 = nothing, 3 = errors, ..., 7 = debug.
+- `++CLEAR`	Deletes all messages from the SIM.
+- `++CONTACTS`	Dumps the first 25 contacts from the SIM to the console.
+- `++DUMP`	Dumps all messages from the SIM to the console.
+- `++DELETE <n>`	Enables/disables deletion of received messages (n is expected to be 0 or 1).
+- `++EXPIRE <n>`	Enables/disables expiration support (n is expected to be 0 or 1).
+- `++FORWARD <n>`	Enables/disables forwarding support (n is expected to be 0 or 1).
+- `++HEADER <n>`	Enables/disables an additional header (n is expected to be 0 or 1).
+- `++LOG <n>`	Sets verbosity level; e.g., ++LOG 7 enables debug output.
+- `++MULTIPART <n>`	Enables/disables multipart SMS support (n is expected to be 0 or 1).
+- `++SAVED`	Dumps all messages from the hash table to the console.
 
 ### Software Description
 #### Compilation
@@ -98,13 +114,10 @@ README.md
 Platform-dependent code is mainly located in `smsf-hal.c`.
 
 #### Known Issues
-- SMS concatenation is not supported: messages that are too long will be truncated, and if a message arrives in multiple parts, only the first part will be forwarded.
-- Timestamp processing needs improvement: the century (20xx) is hardcoded, and the time zone is not considered when calculating expiration.
+SIM800Lv2 is sensitive to the power provided, not all USB power supply will work.
 
 ### Hardware Description
-The core hardware consists of an ESP32 microcontroller and a SIM800Lv2 modem. The modem is connected to GPIO 27 (modem TX) and GPIO 25 (modem RX), which are configured as RX and TX for UART2 on the microcontroller. Additionally, an I2C LCD screen is connected to GPIO 21 (SDA) and GPIO 22 (SCK). The screen is powered by the microcontroller's 3.3V output. The modem requires a separate 5V power supply, as it can draw over 1A during network connection peaks. A 4700µF/16V capacitor is installed in the system to handle power surges.
-
-**TODO:** Currently, power is supplied through an unusual MB102 board. It needs to be checked whether a standard USB power adapter can be used instead.
+The main hardware components include an ESP32 microcontroller and a SIM800Lv2 modem. The modem is connected to the microcontroller via GPIO 27 (modem TX) and GPIO 25 (modem RX), which are configured as UART2 RX and TX, respectively. An I2C LCD display is also connected, using GPIO 21 for SDA and GPIO 22 for SCL, and is powered directly from the ESP32’s 3.3V output. The SIM800Lv2 modem, however, requires a dedicated 5V power source, as it can draw over 1A during peak network activity. To handle power surges, a 4700µF/16V capacitor is included in the circuit. Additionally, an RL207 diode is used to protect the ESP32 from potential overloads caused by the modem.
 
 ![s3smsf.png](docs/s3smsf.png)
 

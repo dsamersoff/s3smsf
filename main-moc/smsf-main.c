@@ -55,6 +55,20 @@ static void usage(const char *msg) {
     exit(7);
 }
 
+#include "smsf-util.h"
+
+void test_date_conversion() {
+    printf("\n Testing date conversion:\n");
+    char iso_ts[] = "2025-04-01T12:34:56Z+3";
+    char gsm_ts[] = "25/04/04,20:42:13+12";
+    time_t iso_time = iso2time(iso_ts);
+    time_t gsm_time = gsm2time(gsm_ts);
+
+    printf("ISO: %s %ld\n", iso_ts, iso_time);
+    printf("GSM: %s %ld\n", gsm_ts, gsm_time);
+    printf("Delta: %ld %ld\n", gsm_time - iso_time, (gsm_time - iso_time)/(3600 *24));
+}
+
 
 int main(int argc, char* argv[]) {
 
@@ -113,10 +127,14 @@ int main(int argc, char* argv[]) {
 
 
 #ifdef _PDU_TEST
+
+    test_date_conversion();
+
+
     int errs = test_pdu();
     if (errs > 0) {
         printf("PDU Parser self-test error\n");
-        exit(0);
+//        exit(0);
     }
 #endif
 
@@ -153,13 +171,14 @@ int main(int argc, char* argv[]) {
         //    exit(-1);
         // }
 
-        if (proceed_command_message(_fd, o_command) != 1) {
+        if (process_command_message(_fd, o_command) != 1) {
             log_err("Invalid command {%s}", o_command);
             usage(NULL);
         }
 
         exit(0);
     }
+
 
     // Main loop
     res = flow_setup(_fd, (notify_func_t *) send_to_display, o_destaddr);
